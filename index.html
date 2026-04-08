@@ -162,7 +162,7 @@
     // --- Main App Component ---
     function App() {
       const [user, setUser] = useState(null);
-      const [authError, setAuthError] = useState(''); // 認証エラー表示用
+      const [authError, setAuthError] = useState('');
       const [childrenData, setChildrenData] = useState([]);
       const [records, setRecords] = useState([]);
       
@@ -367,14 +367,31 @@
         }
 
         try {
-          const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${geminiApiKey}`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
+          // モデルを安定版の `gemini-2.5-flash` に変更
+          const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiApiKey}`, {
+            method: 'POST', 
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
           });
+          
           const data = await res.json();
-          setAiReview(data.candidates?.[0]?.content?.parts?.[0]?.text || '通信に失敗したぞ！');
+          
+          // エラー詳細を取得するためのハンドリング
+          if (!res.ok) {
+            console.error("Gemini API Error:", data);
+            throw new Error(data.error?.message || "API呼び出しエラー");
+          }
+          
+          if (data.candidates && data.candidates[0].finishReason !== 'STOP') {
+             console.error("Gemini API Finish Reason:", data.candidates[0].finishReason);
+             throw new Error("生成がブロックされました。");
+          }
+
+          setAiReview(data.candidates?.[0]?.content?.parts?.[0]?.text || 'コーチの言葉が見つからなかったぞ！');
         } catch (e) {
-          setAiReview('通信エラーだ...腕立てして待ってろ！');
+          console.error("AI Review Fetch Error:", e);
+          // エラー原因を画面に表示する
+          setAiReview(`通信エラーだ...腕立てして待ってろ！\n\n【エラー原因】\n${e.message}`);
         } finally {
           setIsAiLoading(false);
         }
