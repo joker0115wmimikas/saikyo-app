@@ -5,20 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>【最強！】全国最強小学生体力最強テスト(※最強)〜目指せ最強！〜</title>
   
-  <!-- Tailwind CSS -->
   <script src="https://cdn.tailwindcss.com"></script>
-  
-  <!-- React & ReactDOM -->
   <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-  
-  <!-- Babel -->
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-
-  <!-- Lucide Icons -->
   <script src="https://unpkg.com/lucide@latest"></script>
-
-  <!-- Firebase v9 (compat版) -->
   <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
@@ -59,14 +50,13 @@
     const auth = firebase.auth();
     const db = firebase.firestore();
 
-    // プレビュー環境(iframe)での通信エラー回避設定
     try {
       db.settings({ experimentalForceLongPolling: true });
     } catch (e) {
-      console.log("Firestore settings error (Ignored):", e);
+      console.log("Firestore settings error:", e);
     }
 
-    // --- Constants & Masters ---
+    // --- Constants ---
     const SCORE_THRESHOLDS = {
       '男': {
         grip: [ [12,11,9,8,7,5,4,3,2], [14,13,11,10,8,6,5,4,3], [17,15,13,12,10,8,7,5,4], [19,18,16,14,12,10,8,6,5], [23,21,18,16,14,12,10,8,6], [27,24,21,19,16,13,11,9,7] ],
@@ -138,7 +128,6 @@
 
     const getTitleInfo = (totalScore, grade) => {
       if (totalScore === 0) return { name: '計測せよ', color: 'bg-gray-400 text-white', iconName: 'star', hell: 'ゴミ' };
-      
       const stats = GRADE_STATS[Math.max(1, Math.min(6, grade))];
       const dev = Math.round(((totalScore - stats.mean) / stats.sd) * 10 + 50);
 
@@ -173,6 +162,7 @@
     // --- Main App Component ---
     function App() {
       const [user, setUser] = useState(null);
+      const [authError, setAuthError] = useState(''); // 認証エラー表示用
       const [childrenData, setChildrenData] = useState([]);
       const [records, setRecords] = useState([]);
       
@@ -191,7 +181,7 @@
       const [isAiLoading, setIsAiLoading] = useState(false);
       const [showAiModal, setShowAiModal] = useState(false);
 
-      // Auth (iframe制限回避処理を含む)
+      // Auth
       useEffect(() => {
         let isMounted = true;
         
@@ -202,10 +192,15 @@
               if (!isMounted) return;
               if (currentUser) {
                 setUser(currentUser);
+                setAuthError('');
               } else {
                 auth.signInAnonymously().catch(e => {
                   console.error("Auth Error:", e);
-                  alert(`プレビュー制限でログインに失敗しました。\nGitHub Pagesで公開すると正常に動きます。\nエラー詳細: ${e.message}`);
+                  if (e.code === 'auth/configuration-not-found') {
+                    setAuthError('Firebaseコンソールで「匿名ログイン」が有効になっていません。「Authentication」→「Sign-in method」から「匿名」をオンにしてください。');
+                  } else {
+                    setAuthError(`ログイン失敗: ${e.message}`);
+                  }
                 });
               }
             });
@@ -225,13 +220,13 @@
           setChildrenData(data);
           if (data.length > 0 && !currentChildId) setCurrentChildId(data[0].id);
         }, err => {
-          console.error("Fetch children error:", err);
-          if(err.code === 'permission-denied') alert('Firebaseのルールの設定（手順1）を完了させてください。');
+          console.error("Fetch error:", err);
+          setAuthError('Firestore読込エラー（ルールの設定を確認してください）');
         });
 
         const unsubRecords = recordsRef.onSnapshot(snap => {
           setRecords(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })));
-        }, err => console.error("Fetch records error:", err));
+        }, err => console.error(err));
 
         return () => { unsubChildren(); unsubRecords(); };
       }, [user, currentChildId]);
@@ -261,14 +256,15 @@
       }, [records, currentChildId]);
 
       const latestAnalyzed = analyzeRecord(userRecords[0], currentChild);
-      
       const rivalRecords = useMemo(() => records.filter(r => r.childId === rivalId).sort((a, b) => new Date(b.date) - new Date(a.date)), [records, rivalId]);
       const rivalLatestAnalyzed = analyzeRecord(rivalRecords[0], rivalChild);
 
 
       // Actions
       const handleSaveRecord = async () => {
-        if (!user || !currentChildId) return;
+        if (!user) return alert("Firebaseの設定が完了していません。\n画面上の赤いエラーメッセージを確認してください。");
+        if (!currentChildId) return alert("選手を選択してください。");
+        
         const recordId = editingRecordId || Date.now().toString();
         const newRecord = {
           id: recordId,
@@ -284,7 +280,7 @@
           setCurrentTab('history');
         } catch (e) { 
           console.error(e); 
-          alert(`保存エラー: ${e.message}\nFirebaseのルール設定が完了しているか確認してください。`); 
+          alert(`保存エラー: ${e.message}\nFirestoreのルール設定を確認してください。`); 
         }
       };
 
@@ -300,7 +296,12 @@
 
       const handleAddChild = async (e) => {
         e.preventDefault();
-        if (!user) return;
+        
+        if (!user) {
+          alert("Firebaseの設定が完了していません。\n画面上の赤いエラーメッセージを確認し、設定を行ってください。");
+          return;
+        }
+
         const fd = new FormData(e.target);
         const name = fd.get('name');
         if(!name) return;
@@ -319,7 +320,7 @@
           e.target.reset();
         } catch (e) { 
           console.error(e); 
-          alert(`登録エラー: ${e.message}\nFirebaseのルール設定が完了しているか確認してください。`); 
+          alert(`登録エラー: ${e.message}\nFirestoreのルールが「テストモード」から変更されているか確認してください。`); 
         }
       };
 
@@ -417,6 +418,14 @@
 
           <div className="p-4">
             
+            {/* エラー警告表示 */}
+            {authError && (
+              <div className="bg-red-100 text-red-700 p-4 rounded-xl mb-4 text-sm font-bold border border-red-300 shadow-sm animate-pulse">
+                ⚠️ 設定エラー<br/>
+                <span className="text-xs font-normal mt-1 block">{authError}</span>
+              </div>
+            )}
+
             {childrenData.length === 0 && currentTab !== 'settings' && (
               <div className="text-center py-20 animate-fade-in">
                 <Icon name="user" size={64} className="mx-auto mb-4 text-gray-300" />
