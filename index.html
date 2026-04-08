@@ -162,6 +162,9 @@
     // --- Main App Component ---
     function App() {
       const [user, setUser] = useState(null);
+      const [familyCode, setFamilyCode] = useState(localStorage.getItem('saikyo_family_code') || '');
+      const [inputFamilyCode, setInputFamilyCode] = useState('');
+      
       const [authError, setAuthError] = useState('');
       const [childrenData, setChildrenData] = useState([]);
       const [records, setRecords] = useState([]);
@@ -184,7 +187,6 @@
       // Auth
       useEffect(() => {
         let isMounted = true;
-        
         auth.setPersistence(firebase.auth.Auth.Persistence.LOCAL)
           .catch(() => auth.setPersistence(firebase.auth.Auth.Persistence.NONE))
           .then(() => {
@@ -196,11 +198,7 @@
               } else {
                 auth.signInAnonymously().catch(e => {
                   console.error("Auth Error:", e);
-                  if (e.code === 'auth/configuration-not-found') {
-                    setAuthError('Firebaseコンソールで「匿名ログイン」が有効になっていません。「Authentication」→「Sign-in method」から「匿名」をオンにしてください。');
-                  } else {
-                    setAuthError(`ログイン失敗: ${e.message}`);
-                  }
+                  setAuthError(`ログイン処理に失敗しました。お使いのブラウザで「サイト越えトラッキング」がブロックされている可能性があります。\n[詳細: ${e.message}]`);
                 });
               }
             });
@@ -210,26 +208,45 @@
 
       // Data Fetching
       useEffect(() => {
-        if (!user) return;
+        // ユーザーがログインしていない、または合言葉がない場合はデータを取得しない
+        if (!user || !familyCode) return;
         
-        const childrenRef = db.collection('users').doc(user.uid).collection('children');
-        const recordsRef = db.collection('users').doc(user.uid).collection('records');
+        const childrenRef = db.collection('families').doc(familyCode).collection('children');
+        const recordsRef = db.collection('families').doc(familyCode).collection('records');
 
         const unsubChildren = childrenRef.onSnapshot(snap => {
           const data = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
           setChildrenData(data);
+          // エラーが消えたらリセット
+          setAuthError('');
           if (data.length > 0 && !currentChildId) setCurrentChildId(data[0].id);
         }, err => {
-          console.error("Fetch error:", err);
-          setAuthError('Firestore読込エラー（ルールの設定を確認してください）');
+          console.error("Fetch children error:", err);
+          setAuthError(`データ読込エラー！\nFirebaseのルールが反映されていないか、設定に誤りがあります。\n[詳細: ${err.message}]`);
         });
 
         const unsubRecords = recordsRef.onSnapshot(snap => {
           setRecords(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })));
-        }, err => console.error(err));
+        }, err => {
+           console.error("Fetch records error:", err);
+        });
 
         return () => { unsubChildren(); unsubRecords(); };
-      }, [user, currentChildId]);
+      }, [user, familyCode, currentChildId]);
+
+      const handleFamilyCodeSubmit = (e) => {
+        e.preventDefault();
+        // ログインがまだ完了していない場合は警告
+        if (!user) {
+          alert("裏側でログイン処理が完了していません。数秒待つか、ブラウザのプライベートモードを解除してください。");
+          return;
+        }
+        if(!inputFamilyCode) return;
+        localStorage.setItem('saikyo_family_code', inputFamilyCode);
+        setFamilyCode(inputFamilyCode);
+        // リロードして状態を確実にリセット
+        window.location.reload();
+      };
 
       const currentChild = childrenData.find(c => c.id === currentChildId);
       const rivalChild = childrenData.find(c => c.id === rivalId);
@@ -262,7 +279,8 @@
 
       // Actions
       const handleSaveRecord = async () => {
-        if (!user) return alert("Firebaseの設定が完了していません。\n画面上の赤いエラーメッセージを確認してください。");
+        if (!user) return alert("ログインが完了していません。画面の赤いエラーを確認してください。");
+        if (!familyCode) return alert("合言葉が設定されていません。");
         if (!currentChildId) return alert("選手を選択してください。");
         
         const recordId = editingRecordId || Date.now().toString();
@@ -276,31 +294,29 @@
         };
         
         try {
-          await db.collection('users').doc(user.uid).collection('records').doc(recordId).set(newRecord);
+          await db.collection('families').doc(familyCode).collection('records').doc(recordId).set(newRecord);
           setCurrentTab('history');
         } catch (e) { 
           console.error(e); 
-          alert(`保存エラー: ${e.message}\nFirestoreのルール設定を確認してください。`); 
+          alert(`保存エラー！Firebaseのルール設定を確認してください。\n[詳細: ${e.message}]`); 
         }
       };
 
       const handleDeleteRecord = async () => {
-        if (!user || !editingRecordId) return;
+        if (!user || !editingRecordId || !familyCode) return;
         if (window.confirm('本当にこの記録を削除しますか？')) {
           try {
-            await db.collection('users').doc(user.uid).collection('records').doc(editingRecordId).delete();
+            await db.collection('families').doc(familyCode).collection('records').doc(editingRecordId).delete();
             setCurrentTab('history');
-          } catch (e) { console.error(e); alert('削除に失敗しました'); }
+          } catch (e) { console.error(e); alert(`削除に失敗しました\n[詳細: ${e.message}]`); }
         }
       };
 
       const handleAddChild = async (e) => {
         e.preventDefault();
         
-        if (!user) {
-          alert("Firebaseの設定が完了していません。\n画面上の赤いエラーメッセージを確認し、設定を行ってください。");
-          return;
-        }
+        if (!user) return alert("ログインが完了していません。画面の赤いエラーを確認してください。");
+        if (!familyCode) return alert("合言葉を設定してください。");
 
         const fd = new FormData(e.target);
         const name = fd.get('name');
@@ -314,13 +330,13 @@
         };
         
         try {
-          await db.collection('users').doc(user.uid).collection('children').doc(newId).set(newChild);
+          await db.collection('families').doc(familyCode).collection('children').doc(newId).set(newChild);
           setCurrentChildId(newId);
           setCurrentTab('home');
           e.target.reset();
         } catch (e) { 
           console.error(e); 
-          alert(`登録エラー: ${e.message}\nFirestoreのルールが「テストモード」から変更されているか確認してください。`); 
+          alert(`選手登録エラー！Firebaseのルール設定を確認してください。\n[詳細: ${e.message}]`); 
         }
       };
 
@@ -367,7 +383,6 @@
         }
 
         try {
-          // モデルを安定版の `gemini-2.5-flash` に変更
           const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiApiKey}`, {
             method: 'POST', 
             headers: { 'Content-Type': 'application/json' },
@@ -376,22 +391,19 @@
           
           const data = await res.json();
           
-          // エラー詳細を取得するためのハンドリング
           if (!res.ok) {
             console.error("Gemini API Error:", data);
             throw new Error(data.error?.message || "API呼び出しエラー");
           }
           
           if (data.candidates && data.candidates[0].finishReason !== 'STOP') {
-             console.error("Gemini API Finish Reason:", data.candidates[0].finishReason);
              throw new Error("生成がブロックされました。");
           }
 
           setAiReview(data.candidates?.[0]?.content?.parts?.[0]?.text || 'コーチの言葉が見つからなかったぞ！');
         } catch (e) {
           console.error("AI Review Fetch Error:", e);
-          // エラー原因を画面に表示する
-          setAiReview(`通信エラーだ...腕立てして待ってろ！\n\n【エラー原因】\n${e.message}`);
+          setAiReview(`通信エラーだ...腕立てして待ってろ！\n\n【エラー詳細】\n${e.message}`);
         } finally {
           setIsAiLoading(false);
         }
@@ -400,6 +412,41 @@
       const theme = isHellMode 
         ? { bg: 'bg-gray-950', text: 'text-red-100 font-serif', card: 'bg-gray-900 border-red-900', accent: 'bg-red-800 text-white', accentText: 'text-red-500' }
         : { bg: 'bg-slate-50', text: 'text-gray-800 font-sans', card: 'bg-white border-gray-100', accent: 'bg-orange-500 text-white', accentText: 'text-orange-500' };
+
+      // ★ 家族の合言葉入力画面 ★
+      if (!familyCode) {
+        return (
+          <div className="max-w-md mx-auto min-h-screen bg-orange-50 flex flex-col items-center justify-center p-6">
+            <div className="bg-white p-8 rounded-3xl shadow-xl w-full text-center">
+              <Icon name="key-round" size={48} className="text-orange-500 mx-auto mb-4" />
+              <h1 className="text-xl font-extrabold text-gray-800 mb-2">家族の合言葉を入力</h1>
+              <p className="text-xs text-gray-500 mb-6 font-bold leading-relaxed">
+                お母さんのスマホとお子さんのスマホで<br/>同じ合言葉を入れるとデータが共有されるよ！<br/>（例：suzuki1234）
+              </p>
+              <form onSubmit={handleFamilyCodeSubmit}>
+                <input 
+                  type="text" 
+                  required
+                  value={inputFamilyCode}
+                  onChange={e => setInputFamilyCode(e.target.value)}
+                  placeholder="合言葉を決めてね" 
+                  className="w-full bg-gray-100 border border-gray-200 rounded-xl p-4 font-bold outline-none focus:ring-2 focus:ring-orange-500 mb-4 text-center text-lg"
+                />
+                <button type="submit" className="w-full bg-orange-500 text-white font-bold py-4 rounded-xl shadow-md text-lg">
+                  はじめる！
+                </button>
+              </form>
+            </div>
+            
+            {/* ログインエラーがある場合は下に小さく表示 */}
+            {authError && (
+              <div className="mt-4 bg-red-100 text-red-700 p-3 rounded-xl text-xs font-bold text-center w-full">
+                ⚠️ 準備中: {authError}
+              </div>
+            )}
+          </div>
+        );
+      }
 
       return (
         <div className={`max-w-md mx-auto min-h-screen pb-24 shadow-2xl relative overflow-hidden transition-colors duration-500 ${theme.bg} ${theme.text}`}>
@@ -438,8 +485,8 @@
             {/* エラー警告表示 */}
             {authError && (
               <div className="bg-red-100 text-red-700 p-4 rounded-xl mb-4 text-sm font-bold border border-red-300 shadow-sm animate-pulse">
-                ⚠️ 設定エラー<br/>
-                <span className="text-xs font-normal mt-1 block">{authError}</span>
+                ⚠️ エラー<br/>
+                <span className="text-xs font-normal mt-1 block whitespace-pre-wrap">{authError}</span>
               </div>
             )}
 
@@ -693,6 +740,12 @@
                     </div>
                     <button type="submit" className={`w-full font-bold py-3 rounded-xl mt-2 shadow-md ${isHellMode ? 'bg-red-900 text-black' : 'bg-gray-800 text-white'}`}>追加する</button>
                   </form>
+                </div>
+
+                <div className={`rounded-3xl p-6 shadow-sm border ${theme.card}`}>
+                  <h2 className={`font-bold text-xl mb-4 border-b pb-2 flex items-center gap-2 ${isHellMode?'border-red-900':''}`}><Icon name="key-round" size={20}/> 家族の合言葉</h2>
+                  <p className="text-sm opacity-80 mb-2">現在の合言葉: <span className="font-bold text-orange-500">{familyCode}</span></p>
+                  <button onClick={() => { localStorage.removeItem('saikyo_family_code'); window.location.reload(); }} className="w-full bg-red-100 text-red-600 font-bold py-2 rounded-xl mt-2">合言葉を変更する</button>
                 </div>
               </div>
             )}
