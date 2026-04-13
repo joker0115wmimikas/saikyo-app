@@ -21,6 +21,9 @@
     .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
     .pb-safe { padding-bottom: env(safe-area-inset-bottom, 24px); }
     * { -webkit-tap-highlight-color: transparent; }
+    /* カスタムトグルスイッチ */
+    .toggle-checkbox:checked { right: 0; border-color: #f97316; }
+    .toggle-checkbox:checked + .toggle-label { background-color: #f97316; }
   </style>
 </head>
 <body class="bg-slate-50">
@@ -44,22 +47,14 @@
       appId: "1:785928842617:web:cf7b2f334f14527ccad3a8"
     };
 
-    if (!firebase.apps.length) {
-      firebase.initializeApp(firebaseConfig);
-    }
+    if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
     const auth = firebase.auth();
     const db = firebase.firestore();
 
-    try {
-      db.settings({ experimentalForceLongPolling: true });
-    } catch (e) {
-      console.log("Firestore settings error (Ignored):", e);
-    }
+    try { db.settings({ experimentalForceLongPolling: true }); } catch (e) {}
+    const SHARED_APP_ID = 'saikyo-shared'; // 全員共有のパス
 
-    // 家族共通のデータ保存場所
-    const SHARED_APP_ID = 'saikyo-shared';
-
-    // --- Constants & Masters ---
+    // --- Constants ---
     const SCORE_THRESHOLDS = {
       '男': {
         grip: [ [12,11,9,8,7,5,4,3,2], [14,13,11,10,8,6,5,4,3], [17,15,13,12,10,8,7,5,4], [19,18,16,14,12,10,8,6,5], [23,21,18,16,14,12,10,8,6], [27,24,21,19,16,13,11,9,7] ],
@@ -104,8 +99,19 @@
       4: { mean: 48, sd: 9 }, 5: { mean: 55, sd: 9 }, 6: { mean: 60, sd: 9 }
     };
 
+    const DEFAULT_ICONS = ['👦', '👧', '🧑', '🐱', '🐶', '🦁', '🐰', '🐻', '🐼', '🐸'];
+    
+    const RARE_ICONS = [
+      { id: '10pt', icon: '👑', name: '王冠', desc: 'いずれかの種目で10点満点をとる！' },
+      { id: 'all', icon: '🌟', name: 'スター', desc: '1回のテストで全8種目を計測完了する！' },
+      { id: 'a_rank', icon: '🐉', name: 'ドラゴン', desc: '暫定評価でA判定を獲得する！' },
+      { id: 'best', icon: '🔥', name: '炎', desc: '過去の自分を超えろ！合計点をアップさせる！' },
+      { id: 'speed', icon: '⚡', name: 'イナズマ', desc: '50m走で8点以上をとる！' }
+    ];
+
+    // --- Utility Functions ---
     const calcScore = (val, gender, grade, eventId) => {
-      if (val === undefined || val === '') return 0;
+      if (val === undefined || val === null || val === '') return 0;
       const gradeIdx = Math.max(0, Math.min(5, grade - 1));
       const thresholds = SCORE_THRESHOLDS[gender]?.[eventId]?.[gradeIdx];
       if (!thresholds) return 1;
@@ -118,47 +124,38 @@
       return 1;
     };
 
-    const getComprehensiveGrade = (totalScore, gender, grade) => {
-      if (totalScore === 0) return '-';
+    const getGradeInfo = (totalScore, gender, grade) => {
       const gradeIdx = Math.max(0, Math.min(5, grade - 1));
       const borders = GRADE_THRESHOLDS[gender][gradeIdx];
-      if (totalScore >= borders[0]) return 'A';
-      if (totalScore >= borders[1]) return 'B';
-      if (totalScore >= borders[2]) return 'C';
-      if (totalScore >= borders[3]) return 'D';
-      return 'E';
+      if (totalScore >= borders[0]) return { grade: 'A', nextPoint: null, nextName: null };
+      if (totalScore >= borders[1]) return { grade: 'B', nextPoint: borders[0] - totalScore, nextName: 'A' };
+      if (totalScore >= borders[2]) return { grade: 'C', nextPoint: borders[1] - totalScore, nextName: 'B' };
+      if (totalScore >= borders[3]) return { grade: 'D', nextPoint: borders[2] - totalScore, nextName: 'C' };
+      return { grade: 'E', nextPoint: borders[3] - totalScore, nextName: 'D' };
     };
 
-    const getTitleInfo = (totalScore, grade) => {
-      if (totalScore === 0) return { name: '計測せよ', color: 'bg-gray-400 text-white', iconName: 'star', hell: 'ゴミ' };
+    const getTitleInfo = (estimatedScore, grade, measuredCount) => {
+      if (measuredCount === 0) return { name: 'まだ見ぬ強者', color: 'bg-gray-400 text-white', iconName: 'star', hell: '測りもせずに何を見ている！' };
+      
       const stats = GRADE_STATS[Math.max(1, Math.min(6, grade))];
-      const dev = Math.round(((totalScore - stats.mean) / stats.sd) * 10 + 50);
+      const dev = Math.round(((estimatedScore - stats.mean) / stats.sd) * 10 + 50);
 
-      if (dev >= 70) return { name: 'もはや鬼', color: 'bg-gradient-to-r from-purple-600 to-indigo-800 text-white shadow-purple-500/50', iconName: 'skull', hell: '上出来だ。だがまだ鬼舞辻様には遠く及ばぬ。' }; 
-      if (dev >= 63) return { name: '最強小学生', color: 'bg-gradient-to-r from-yellow-300 via-yellow-500 to-yellow-600 text-black border-2 border-yellow-200', iconName: 'trophy', hell: 'ふん、まあ見れる数字だな。だが驕るな！' }; 
-      if (dev >= 60) return { name: 'ゲキツヨ', color: 'bg-red-500 text-white', iconName: 'flame', hell: 'こんな数字で満足しているのか？腕立て1000回追加だ！' }; 
+      if (dev >= 70) return { name: 'もはや鬼', color: 'bg-gradient-to-r from-purple-600 to-indigo-800 text-white shadow-purple-500/50', iconName: 'skull', hell: 'ふん、上出来だ。だがまだ鬼舞辻様には遠く及ばぬ。' }; 
+      if (dev >= 63) return { name: '最強小学生', color: 'bg-gradient-to-r from-yellow-300 via-yellow-500 to-yellow-600 text-black border-2 border-yellow-200', iconName: 'trophy', hell: 'まあ見れる数字だな。だが驕るな、足元をすくわれるぞ！' }; 
+      if (dev >= 60) return { name: 'ゲキツヨ', color: 'bg-red-500 text-white', iconName: 'flame', hell: 'こんな数字で満足しているのか？閻魔の炎で焼き尽くすぞ！' }; 
       if (dev >= 56) return { name: 'ツヨメ', color: 'bg-orange-500 text-white', iconName: 'zap', hell: '中途半端な奴が一番嫌いなんだ。死ぬ気で走れ！' }; 
       if (dev >= 52) return { name: '努力賞', color: 'bg-blue-500 text-white', iconName: 'award', hell: '努力だけじゃ人は救えん！結果を出せ、結果を！' }; 
       if (dev >= 47) return { name: 'マーマー', color: 'bg-green-500 text-white', iconName: 'activity', hell: '判断が遅い！そんな緩みきった肉体でどうする！' }; 
-      return { name: '鱗瀧先生激怒', color: 'bg-gray-800 text-red-500 font-serif border-2 border-red-800', iconName: 'shield-alert', hell: '貴様には才能がない！今すぐ山を降りろ！！！' }; 
+      return { name: '閻魔様激怒', color: 'bg-gray-800 text-red-500 font-serif border-2 border-red-800', iconName: 'shield-alert', hell: '貴様には才能がない！今すぐ針の山を走ってこい！！！' }; 
     };
 
-    const getComprehensiveGradeStyle = (gradeChar) => {
+    const getStyle = (gradeChar) => {
       switch (gradeChar) {
-        case 'A': return 'text-transparent bg-clip-text bg-gradient-to-br from-yellow-400 to-orange-600';
-        case 'B': return 'text-blue-500';
-        case 'C': return 'text-green-500';
-        case 'D': return 'text-orange-400';
-        default: return 'text-gray-400';
-      }
-    };
-    const getComprehensiveStyle = (gradeChar) => {
-      switch (gradeChar) {
-        case 'A': return 'bg-gradient-to-r from-yellow-300 via-yellow-500 to-yellow-600 text-white shadow-yellow-500/50';
-        case 'B': return 'bg-blue-500 text-white';
-        case 'C': return 'bg-green-500 text-white';
-        case 'D': return 'bg-orange-400 text-white';
-        default: return 'bg-gray-400 text-white';
+        case 'A': return { text: 'text-transparent bg-clip-text bg-gradient-to-br from-yellow-400 to-orange-600', bg: 'bg-gradient-to-r from-yellow-300 via-yellow-500 to-yellow-600 text-white shadow-yellow-500/50' };
+        case 'B': return { text: 'text-blue-500', bg: 'bg-blue-500 text-white' };
+        case 'C': return { text: 'text-green-500', bg: 'bg-green-500 text-white' };
+        case 'D': return { text: 'text-orange-400', bg: 'bg-orange-400 text-white' };
+        default: return { text: 'text-gray-400', bg: 'bg-gray-400 text-white' };
       }
     };
 
@@ -179,59 +176,37 @@
       const [inputDate, setInputDate] = useState('');
       const [inputGrade, setInputGrade] = useState(1);
       const [inputComment, setInputComment] = useState('');
+      const [showIconModal, setShowIconModal] = useState(false);
 
       const [aiReview, setAiReview] = useState('');
       const [isAiLoading, setIsAiLoading] = useState(false);
       const [showAiModal, setShowAiModal] = useState(false);
 
-      // Auth (Initialize and get valid connection)
       useEffect(() => {
         let isMounted = true;
         const initAuth = async () => {
-          try {
-            await auth.signInAnonymously();
-          } catch (e) {
-            console.error("Auth Error:", e);
-            if(isMounted) setAuthError(`接続エラー: ${e.message}`);
-          }
+          try { await auth.signInAnonymously(); } catch (e) { if(isMounted) setAuthError(`接続エラー: ${e.message}`); }
         };
         initAuth();
-        
         const unsubscribe = auth.onAuthStateChanged(currentUser => {
           if (!isMounted) return;
-          if (currentUser) {
-            setUser(currentUser);
-            setAuthError('');
-          }
+          if (currentUser) { setUser(currentUser); setAuthError(''); }
         });
         return () => { isMounted = false; unsubscribe && unsubscribe(); };
       }, []);
 
-      // Data Fetching (共通のパスから全データを取得)
       useEffect(() => {
         if (!user) return;
-        
-        // ★ ここがポイント：全員が同じ「saikyo-shared」フォルダを見る
         const basePath = db.collection('artifacts').doc(SHARED_APP_ID).collection('public').doc('data');
-        const childrenRef = basePath.collection('children');
-        const recordsRef = basePath.collection('records');
-
-        const unsubChildren = childrenRef.onSnapshot(snap => {
+        const unsubChildren = basePath.collection('children').onSnapshot(snap => {
           const data = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
           setChildrenData(data);
-          setAuthError(''); // 成功したらエラーを消す
+          setAuthError('');
           if (data.length > 0 && !currentChildId) setCurrentChildId(data[0].id);
-        }, err => {
-          console.error("Fetch children error:", err);
-          setAuthError(`通信エラー: Firebaseのルール設定（ステップ1）を完了してください。\n[${err.message}]`);
-        });
-
-        const unsubRecords = recordsRef.onSnapshot(snap => {
+        }, err => setAuthError(`Firebaseのルール設定を「完全共有」に書き換えてください。\n${err.message}`));
+        const unsubRecords = basePath.collection('records').onSnapshot(snap => {
           setRecords(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })));
-        }, err => {
-          console.error("Fetch records error:", err);
         });
-
         return () => { unsubChildren(); unsubRecords(); };
       }, [user, currentChildId]);
 
@@ -240,53 +215,68 @@
       
       const analyzeRecord = (record, child) => {
         if (!record || !child) return null;
-        let totalScore = 0;
+        let actualScore = 0;
+        let measuredCount = 0;
         const details = [];
+
         Object.keys(EVENT_MASTERS).forEach(eventId => {
           const val = record.data[eventId];
-          const score = calcScore(val, child.gender, record.grade, eventId);
-          totalScore += score;
-          details.push({ ...EVENT_MASTERS[eventId], val, score });
+          const isMeasured = val !== undefined && val !== null;
+          let score = 0;
+          if (isMeasured) {
+            score = calcScore(val, child.gender, record.grade, eventId);
+            actualScore += score;
+            measuredCount++;
+          }
+          details.push({ ...EVENT_MASTERS[eventId], val, score, isMeasured });
         });
-        const compGrade = getComprehensiveGrade(totalScore, child.gender, record.grade);
-        const titleInfo = getTitleInfo(totalScore, record.grade);
-        return { ...record, totalScore, details, compGrade, titleInfo };
+
+        // 暫定評価のための80点満点換算スコア
+        const estimatedScore = measuredCount > 0 ? Math.round((actualScore / measuredCount) * 8) : 0;
+        const gradeInfo = getGradeInfo(estimatedScore, child.gender, record.grade);
+        const titleInfo = getTitleInfo(estimatedScore, record.grade, measuredCount);
+
+        return { ...record, actualScore, estimatedScore, measuredCount, details, compGrade: gradeInfo.grade, gradeInfo, titleInfo };
       };
 
-      const userRecords = useMemo(() => {
-        return records
-          .filter(r => r.childId === currentChildId)
-          .sort((a, b) => new Date(b.date) - new Date(a.date));
-      }, [records, currentChildId]);
-
+      const userRecords = useMemo(() => records.filter(r => r.childId === currentChildId).sort((a, b) => new Date(b.date) - new Date(a.date)), [records, currentChildId]);
       const latestAnalyzed = analyzeRecord(userRecords[0], currentChild);
       const rivalRecords = useMemo(() => records.filter(r => r.childId === rivalId).sort((a, b) => new Date(b.date) - new Date(a.date)), [records, rivalId]);
       const rivalLatestAnalyzed = analyzeRecord(rivalRecords[0], rivalChild);
 
+      // --- ご褒美・実績システム ---
+      const achievements = useMemo(() => {
+        if (!currentChild) return [];
+        const unlocks = [];
+        const analyzedList = userRecords.map(r => analyzeRecord(r, currentChild));
+        
+        // 10点満点
+        if (analyzedList.some(r => r.details.some(d => d.score === 10))) unlocks.push('10pt');
+        // 全種目完了
+        if (analyzedList.some(r => r.measuredCount === 8)) unlocks.push('all');
+        // A判定
+        if (analyzedList.some(r => r.compGrade === 'A')) unlocks.push('a_rank');
+        // 自己ベスト (2つ以上の記録があり、最新がその前より高い)
+        if (analyzedList.length >= 2 && analyzedList[0].estimatedScore > analyzedList[1].estimatedScore) unlocks.push('best');
+        // 50m走で8点以上
+        if (analyzedList.some(r => r.details.find(d => d.id === 'dash50')?.score >= 8)) unlocks.push('speed');
+        
+        return unlocks;
+      }, [userRecords, currentChild]);
+
 
       // Actions
       const handleSaveRecord = async () => {
-        if (!user) return alert("接続が完了していません。数秒お待ちください。");
+        if (!user) return alert("接続エラーです");
         if (!currentChildId) return alert("選手を選択してください。");
         
         const recordId = editingRecordId || Date.now().toString();
-        const newRecord = {
-          id: recordId,
-          childId: currentChildId,
-          date: inputDate,
-          grade: parseInt(inputGrade),
-          data: { ...inputData },
-          comment: inputComment
-        };
-        
+        const newRecord = { id: recordId, childId: currentChildId, date: inputDate, grade: parseInt(inputGrade), data: { ...inputData }, comment: inputComment };
         try {
           const basePath = db.collection('artifacts').doc(SHARED_APP_ID).collection('public').doc('data');
           await basePath.collection('records').doc(recordId).set(newRecord);
           setCurrentTab('history');
-        } catch (e) { 
-          console.error(e); 
-          alert(`保存エラー: Firebaseのルールが変更されていない可能性があります。\n[${e.message}]`); 
-        }
+        } catch (e) { alert(`保存エラー: ${e.message}`); }
       };
 
       const handleDeleteRecord = async () => {
@@ -296,36 +286,34 @@
             const basePath = db.collection('artifacts').doc(SHARED_APP_ID).collection('public').doc('data');
             await basePath.collection('records').doc(editingRecordId).delete();
             setCurrentTab('history');
-          } catch (e) { console.error(e); alert('削除に失敗しました'); }
+          } catch (e) { alert('削除に失敗しました'); }
         }
       };
 
       const handleAddChild = async (e) => {
         e.preventDefault();
-        
-        if (!user) return alert("接続が完了していません。画面の赤いエラーを確認してください。");
-
+        if (!user) return alert("接続エラーです");
         const fd = new FormData(e.target);
-        const name = fd.get('name');
-        if(!name) return;
+        if(!fd.get('name')) return;
         
         const newId = Date.now().toString();
-        const newChild = { 
-          id: newId, name, 
-          defaultGrade: parseInt(fd.get('grade')), 
-          gender: fd.get('gender'), avatar: fd.get('avatar') 
-        };
-        
+        const newChild = { id: newId, name: fd.get('name'), defaultGrade: parseInt(fd.get('grade')), gender: fd.get('gender'), avatar: '👦' };
         try {
           const basePath = db.collection('artifacts').doc(SHARED_APP_ID).collection('public').doc('data');
           await basePath.collection('children').doc(newId).set(newChild);
           setCurrentChildId(newId);
           setCurrentTab('home');
           e.target.reset();
-        } catch (e) { 
-          console.error(e); 
-          alert(`選手追加エラー: Firebaseのルールが変更されていない可能性があります。\n[${e.message}]`); 
-        }
+        } catch (e) { alert(`選手追加エラー: ${e.message}`); }
+      };
+
+      const changeAvatar = async (newAvatar) => {
+        if (!user || !currentChildId) return;
+        try {
+          const basePath = db.collection('artifacts').doc(SHARED_APP_ID).collection('public').doc('data');
+          await basePath.collection('children').doc(currentChildId).update({ avatar: newAvatar });
+          setShowIconModal(false);
+        } catch (e) { alert('アイコン変更に失敗しました'); }
       };
 
       const startEditing = (recordToEdit = null) => {
@@ -345,67 +333,49 @@
         setCurrentTab('input');
       };
 
-      // AI Review
       const fetchAiReview = async () => {
         if(!latestAnalyzed || !currentChild) return;
-        setShowAiModal(true);
-        setIsAiLoading(true);
-        setAiReview('');
+        setShowAiModal(true); setIsAiLoading(true); setAiReview('');
         
         const geminiApiKey = "AIzaSyAlC5tsCQqqD9f9StAgGmijjk0QjPvz2os"; 
         
-        let prompt = `
-          選手: ${currentChild.name} (${latestAnalyzed.grade}年生 ${currentChild.gender})
-          記録: 総合 ${latestAnalyzed.compGrade}判定 / 合計 ${latestAnalyzed.totalScore}点
-          称号: ${latestAnalyzed.titleInfo.name}
-        `;
+        let prompt = `選手: ${currentChild.name} (${latestAnalyzed.grade}年生 ${currentChild.gender})\n`;
+        prompt += `状況: 全8種目中 ${latestAnalyzed.measuredCount} 種目完了。\n`;
+        prompt += `現在合計: ${latestAnalyzed.actualScore}点 (8種目換算の暫定: ${latestAnalyzed.estimatedScore}点 / 暫定評価: ${latestAnalyzed.compGrade}判定)\n`;
+        
+        const goodEvents = latestAnalyzed.details.filter(d => d.isMeasured && d.score >= 8);
+        if (goodEvents.length > 0) prompt += `得意種目: ${goodEvents.map(d => `${d.name}(${d.score}点)`).join(', ')}\n`;
 
-        if (rivalLatestAnalyzed) {
-          prompt += `\nライバル情報: ${rivalChild.name} (合計 ${rivalLatestAnalyzed.totalScore}点)`;
+        if (latestAnalyzed.measuredCount < 8 && latestAnalyzed.gradeInfo.nextName) {
+           prompt += `\nまだ全種目終わっていません。あと${latestAnalyzed.gradeInfo.nextPoint}点取れれば、暫定評価が${latestAnalyzed.gradeInfo.nextName}判定に上がります！これを伝えて励ましてください。\n`;
         }
 
         if (isHellMode) {
-          prompt += `\n【超重要指示】あなたは「地獄の特訓コーチ（鱗瀧先生風）」です。口調はパワハラ寸前の超絶スパルタ、軍隊のように厳しくしてください。「もはや鬼」「最強小学生」の称号でなければ、全てゴミ扱いして激怒してください。「判断が遅い！」「腕立て伏せ1000回だ！」などのワードを使い、甘えを一切許さないでください。150文字以内で。`;
+          prompt += `\n【重要指示】あなたは地獄の特訓コーチ「閻魔大王」です。閻魔様として「地獄の沙汰も記録次第だ！」「針の山を走らせるぞ！」など、恐ろしいがクスッと笑えるユーモアを交えて叱咤激励してください。未完了なら「さっさと残りの種目も測らんか！」と怒ってください。150文字以内で。`;
         } else {
-          prompt += `\n【指示】あなたは子供向けの熱血スポーツコーチです。褒めて伸ばすスタイルで、元気いっぱいにアドバイスしてください。「〜だぜ！」「最高だ！」のような口調で150文字以内で！`;
+          prompt += `\n【重要指示】あなたは子どもを熱烈に褒めちぎるユーモアたっぷりの熱血スポーツコーチです。「この記録は中学生レベルだぞ！」「未来のオリンピック選手だ！」など、大げさなくらい褒めてモチベーションを爆上げしてください！未完了なら「残りの種目もその調子で頑張ろうぜ！」と励ましてください。150文字以内で！`;
         }
 
         try {
           const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiApiKey}`, {
-            method: 'POST', 
-            headers: { 'Content-Type': 'application/json' },
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
           });
-          
           const data = await res.json();
-          
-          if (!res.ok) {
-            console.error("Gemini API Error:", data);
-            throw new Error(data.error?.message || "API呼び出しエラー");
-          }
-          
-          if (data.candidates && data.candidates[0].finishReason !== 'STOP') {
-             throw new Error("生成がブロックされました。");
-          }
-
-          setAiReview(data.candidates?.[0]?.content?.parts?.[0]?.text || 'コーチの言葉が見つからなかったぞ！');
+          if (!res.ok) throw new Error(data.error?.message || "API呼び出しエラー");
+          setAiReview(data.candidates?.[0]?.content?.parts?.[0]?.text || 'コーチからの言葉が見つからなかったぞ！');
         } catch (e) {
-          console.error("AI Review Fetch Error:", e);
-          setAiReview(`通信エラーだ...腕立てして待ってろ！\n\n【エラー詳細】\n${e.message}`);
-        } finally {
-          setIsAiLoading(false);
-        }
+          setAiReview(`通信エラーだ...腕立てして待ってろ！\n\n[エラー詳細: ${e.message}]`);
+        } finally { setIsAiLoading(false); }
       };
 
       const theme = isHellMode 
         ? { bg: 'bg-gray-950', text: 'text-red-100 font-serif', card: 'bg-gray-900 border-red-900', accent: 'bg-red-800 text-white', accentText: 'text-red-500' }
         : { bg: 'bg-slate-50', text: 'text-gray-800 font-sans', card: 'bg-white border-gray-100', accent: 'bg-orange-500 text-white', accentText: 'text-orange-500' };
 
-
       return (
         <div className={`max-w-md mx-auto min-h-screen pb-24 shadow-2xl relative overflow-hidden transition-colors duration-500 ${theme.bg} ${theme.text}`}>
           
-          {/* Header */}
           <div className={`p-4 rounded-b-3xl shadow-lg sticky top-0 z-10 transition-colors ${isHellMode ? 'bg-gradient-to-b from-black to-red-950 text-red-500 border-b border-red-800' : 'bg-gradient-to-r from-orange-500 to-red-500 text-white'}`}>
             <h1 className="text-base sm:text-lg font-extrabold text-center tracking-tight flex flex-col items-center justify-center leading-tight">
               <span className="flex items-center gap-1">
@@ -419,13 +389,8 @@
             {childrenData.length > 0 && (
               <div className="mt-3 flex gap-2 overflow-x-auto pb-1 scrollbar-hide">
                 {childrenData.map(c => (
-                  <button 
-                    key={c.id} onClick={() => { setCurrentChildId(c.id); setCurrentTab('home'); }}
-                    className={`flex items-center gap-1 px-3 py-1.5 rounded-full whitespace-nowrap transition-all shadow-sm ${
-                      currentChildId === c.id 
-                        ? (isHellMode ? 'bg-red-900 text-white font-bold scale-105 border border-red-500' : 'bg-white text-orange-600 font-bold scale-105') 
-                        : (isHellMode ? 'bg-black text-red-700 border border-red-900' : 'bg-orange-400/50 text-white border border-white/20')
-                    }`}
+                  <button key={c.id} onClick={() => { setCurrentChildId(c.id); setCurrentTab('home'); }}
+                    className={`flex items-center gap-1 px-3 py-1.5 rounded-full whitespace-nowrap transition-all shadow-sm ${currentChildId === c.id ? (isHellMode ? 'bg-red-900 text-white font-bold scale-105 border border-red-500' : 'bg-white text-orange-600 font-bold scale-105') : (isHellMode ? 'bg-black text-red-700 border border-red-900' : 'bg-orange-400/50 text-white border border-white/20')}`}
                   >
                     <span className="text-lg">{c.avatar}</span>{c.name}
                   </button>
@@ -436,65 +401,62 @@
 
           <div className="p-4">
             
-            {/* エラー警告表示 */}
-            {authError && (
-              <div className="bg-red-100 text-red-700 p-4 rounded-xl mb-4 text-sm font-bold border border-red-300 shadow-sm animate-pulse">
-                ⚠️ エラー<br/>
-                <span className="text-xs font-normal mt-1 block whitespace-pre-wrap">{authError}</span>
-              </div>
-            )}
+            {authError && <div className="bg-red-100 text-red-700 p-4 rounded-xl mb-4 text-sm font-bold border border-red-300 shadow-sm animate-pulse whitespace-pre-wrap">{authError}</div>}
 
             {childrenData.length === 0 && currentTab !== 'settings' && !authError && (
               <div className="text-center py-20 animate-fade-in">
                 <Icon name="user" size={64} className="mx-auto mb-4 text-gray-300" />
                 <h2 className="text-xl font-bold mb-2">まずは選手を登録しよう！</h2>
-                <p className="text-gray-500 text-sm mb-6">下のかんりボタンから追加してね。</p>
-                <button onClick={() => setCurrentTab('settings')} className="bg-orange-500 text-white px-8 py-3 rounded-full font-bold shadow-md">かんり画面へ</button>
+                <button onClick={() => setCurrentTab('settings')} className="bg-orange-500 text-white px-8 py-3 rounded-full font-bold shadow-md mt-4">かんり画面へ</button>
               </div>
             )}
 
             {/* --- HOME TAB --- */}
             {currentTab === 'home' && currentChild && (
               <div className="space-y-5 animate-fade-in">
-                {!latestAnalyzed ? (
+                
+                {/* バッジ獲得表示 */}
+                {achievements.length > 0 && (
+                  <div className={`p-3 rounded-2xl flex items-center justify-center gap-2 shadow-sm ${isHellMode ? 'bg-red-950 border border-red-900' : 'bg-yellow-50 border border-yellow-200'}`}>
+                    <span className="text-xs font-bold opacity-70">獲得バッジ</span>
+                    {RARE_ICONS.map(r => achievements.includes(r.id) ? <span key={r.id} className="text-xl" title={r.desc}>{r.icon}</span> : null)}
+                  </div>
+                )}
+
+                {!latestAnalyzed || latestAnalyzed.measuredCount === 0 ? (
                   <div className={`text-center py-10 rounded-3xl shadow-sm border ${theme.card}`}>
-                    <p className={`mb-4 ${isHellMode ? 'text-red-500' : 'text-gray-500'}`}>{isHellMode ? '記録もつけずに何をしている！' : 'まだ記録がないよ！'}</p>
-                    <button onClick={() => startEditing()} className={`${theme.accent} px-6 py-3 rounded-full font-bold shadow-md`}>記録をつける！</button>
+                    <p className={`mb-4 ${isHellMode ? 'text-red-500' : 'text-gray-500'}`}>まだ記録がないよ！</p>
+                    <button onClick={() => startEditing(latestAnalyzed)} className={`${theme.accent} px-6 py-3 rounded-full font-bold shadow-md`}>記録をつける！</button>
                   </div>
                 ) : (
                   <>
                     <div className={`p-6 rounded-3xl text-center shadow-lg relative overflow-hidden ${isHellMode ? 'bg-black border border-red-800 text-red-500' : 'bg-white border border-gray-100'}`}>
-                      <div className="text-sm font-bold opacity-80 mb-2 relative z-10">{latestAnalyzed.date} ({latestAnalyzed.grade}年生) の記録</div>
+                      <div className="text-sm font-bold opacity-80 mb-2">{latestAnalyzed.date} ({latestAnalyzed.grade}年生)</div>
                       
-                      <div className={`inline-flex items-center justify-center gap-2 px-4 py-2 rounded-full mb-4 shadow-md ${latestAnalyzed.titleInfo.color} relative z-10`}>
+                      <div className={`inline-flex items-center justify-center gap-2 px-4 py-2 rounded-full mb-4 shadow-md ${latestAnalyzed.titleInfo.color}`}>
                         <Icon name={latestAnalyzed.titleInfo.iconName} size={16} />
                         <span className="font-extrabold tracking-wide">{latestAnalyzed.titleInfo.name}</span>
                         <Icon name={latestAnalyzed.titleInfo.iconName} size={16} />
                       </div>
 
-                      <div className="flex items-baseline justify-center gap-2 mb-2 relative z-10">
-                        <span className="text-xl font-bold">総合</span>
-                        <span className={`text-6xl font-extrabold drop-shadow-md ${isHellMode ? 'text-red-600' : getComprehensiveGradeStyle(latestAnalyzed.compGrade)}`}>{latestAnalyzed.compGrade}</span>
-                        <span className="text-xl font-bold">判定</span>
-                      </div>
-                      <div className={`text-3xl font-extrabold relative z-10 ${isHellMode ? 'text-red-700' : 'text-gray-800'}`}>
-                        合計 {latestAnalyzed.totalScore} <span className="text-sm font-normal opacity-80">/ 80点</span>
+                      <div className="text-sm font-bold opacity-70 mb-1">
+                        {latestAnalyzed.measuredCount === 8 ? '🔥全種目完了！' : `👀${latestAnalyzed.measuredCount}種目の暫定評価`}
                       </div>
 
-                      {rivalChild && rivalLatestAnalyzed && currentChildId !== rivalId && (
-                        <div className={`mt-4 p-3 rounded-xl flex items-center justify-between relative z-10 ${isHellMode ? 'bg-red-950/50 border border-red-900' : 'bg-orange-50 border border-orange-100'}`}>
-                          <div className="flex items-center gap-2">
-                            <Icon name="swords" size={20} className={isHellMode ? 'text-red-500' : 'text-orange-500'}/>
-                            <span className="text-sm font-bold">VS {rivalChild.name}</span>
-                          </div>
-                          <div className="font-bold">
-                            {latestAnalyzed.totalScore > rivalLatestAnalyzed.totalScore 
-                              ? <span className="text-green-500">+{latestAnalyzed.totalScore - rivalLatestAnalyzed.totalScore}点で勝利中！</span>
-                              : latestAnalyzed.totalScore < rivalLatestAnalyzed.totalScore
-                                ? <span className={isHellMode ? 'text-red-600' : 'text-blue-500'}>あと {rivalLatestAnalyzed.totalScore - latestAnalyzed.totalScore}点！</span>
-                                : <span className="text-gray-500">同点！</span>
-                            }
-                          </div>
+                      <div className="flex items-baseline justify-center gap-2 mb-2">
+                        <span className="text-xl font-bold">暫定</span>
+                        <span className={`text-6xl font-extrabold drop-shadow-md ${isHellMode ? 'text-red-600' : getStyle(latestAnalyzed.compGrade).text}`}>{latestAnalyzed.compGrade}</span>
+                        <span className="text-xl font-bold">判定</span>
+                      </div>
+                      
+                      <div className={`text-3xl font-extrabold ${isHellMode ? 'text-red-700' : 'text-gray-800'}`}>
+                        合計 {latestAnalyzed.actualScore} <span className="text-sm font-normal opacity-80">点</span>
+                        {latestAnalyzed.measuredCount < 8 && <span className="text-lg opacity-60 ml-2">(換算: {latestAnalyzed.estimatedScore}点)</span>}
+                      </div>
+
+                      {latestAnalyzed.measuredCount < 8 && latestAnalyzed.gradeInfo.nextName && (
+                        <div className="mt-3 text-sm font-bold text-orange-500">
+                          あと <span className="text-xl">{latestAnalyzed.gradeInfo.nextPoint}</span> 点で {latestAnalyzed.gradeInfo.nextName}判定だ！
                         </div>
                       )}
                     </div>
@@ -505,17 +467,20 @@
                     </button>
 
                     <div className={`rounded-3xl p-4 shadow-sm border ${theme.card}`}>
-                      <h2 className="font-bold mb-3 ml-1">種目ごとの点数</h2>
+                      <div className="flex justify-between items-center mb-3 ml-1">
+                        <h2 className="font-bold">種目ごとの点数</h2>
+                        {latestAnalyzed.measuredCount < 8 && <span className="text-xs bg-orange-100 text-orange-600 px-2 py-1 rounded-full font-bold">未完了あり</span>}
+                      </div>
                       <div className="space-y-3">
                         {latestAnalyzed.details.map(d => (
-                          <div key={d.id} className={`flex items-center gap-3 p-2 rounded-xl ${isHellMode ? 'bg-black border border-red-900/50' : 'bg-gray-50'}`}>
+                          <div key={d.id} className={`flex items-center gap-3 p-2 rounded-xl ${!d.isMeasured ? 'opacity-40 grayscale' : ''} ${isHellMode ? 'bg-black border border-red-900/50' : 'bg-gray-50'}`}>
                             <div className="w-8 text-center text-2xl">{d.icon}</div>
                             <div className="flex-1">
                               <div className="flex justify-between items-baseline mb-1">
                                 <span className="font-bold text-sm">{d.name}</span>
-                                <span className={`font-extrabold text-lg ${theme.accentText}`}>{d.score}<span className="text-xs opacity-50">点</span></span>
+                                <span className={`font-extrabold text-lg ${d.isMeasured ? theme.accentText : ''}`}>{d.isMeasured ? d.score : '?'}<span className="text-xs opacity-50">点</span></span>
                               </div>
-                              <div className="text-xs opacity-60 font-medium">記録: {d.val ? `${d.val}${d.unit}` : '-'}</div>
+                              <div className="text-xs opacity-60 font-medium">記録: {d.isMeasured ? `${d.val}${d.unit}` : '未計測'}</div>
                             </div>
                           </div>
                         ))}
@@ -547,19 +512,18 @@
                           <div className="flex items-center justify-between cursor-pointer" onClick={() => startEditing(record)}>
                             <div>
                               <div className="flex items-center gap-2 mb-1">
-                                <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${isHellMode ? 'bg-red-900 text-white' : getComprehensiveStyle(analyzed.compGrade)}`}>
+                                <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${isHellMode ? 'bg-red-900 text-white' : getStyle(analyzed.compGrade).bg}`}>
                                   {analyzed.compGrade}判定
                                 </span>
                                 <span className="opacity-60 text-sm font-bold flex items-center gap-1"><Icon name="calendar" size={14}/> {record.date}</span>
                               </div>
-                              <div className="font-bold">{record.grade}年生</div>
+                              <div className="font-bold text-sm">{record.grade}年生 <span className="opacity-60 font-normal">({analyzed.measuredCount}種目)</span></div>
                             </div>
                             <div className="text-right">
-                              <div className={`text-2xl font-extrabold ${theme.accentText}`}>{analyzed.totalScore}<span className="text-xs opacity-50">点</span></div>
+                              <div className={`text-2xl font-extrabold ${theme.accentText}`}>{analyzed.actualScore}<span className="text-xs opacity-50">点</span></div>
                               <div className="text-xs opacity-50 flex items-center justify-end gap-1">編集 <Icon name="edit-3" size={10}/></div>
                             </div>
                           </div>
-                          
                           {record.comment && (
                             <div className={`mt-2 p-3 rounded-xl text-sm ${isHellMode ? 'bg-red-950/30 text-red-300 border border-red-900/50' : 'bg-blue-50 text-blue-800 border border-blue-100'}`}>
                               <div className="font-bold flex items-center gap-1 mb-1"><Icon name="message-square-text" size={14}/> 親からのコメント</div>
@@ -595,26 +559,46 @@
                 </div>
 
                 {Object.values(EVENT_MASTERS).map(eventDef => {
-                  const currentVal = inputData[eventDef.id] !== undefined ? inputData[eventDef.id] : eventDef.min;
+                  const isMeasured = inputData[eventDef.id] !== undefined;
+                  const currentVal = isMeasured ? inputData[eventDef.id] : eventDef.min;
+                  
+                  const handleToggle = (e) => {
+                    if (e.target.checked) setInputData({...inputData, [eventDef.id]: eventDef.min});
+                    else { const newData = {...inputData}; delete newData[eventDef.id]; setInputData(newData); }
+                  };
                   const handleVal = (v) => {
-                    let nv = Math.round(v * 10) / 10;
-                    nv = Math.max(eventDef.min, Math.min(eventDef.max, nv));
+                    if(!isMeasured) return;
+                    let nv = Math.max(eventDef.min, Math.min(eventDef.max, Math.round(v * 10) / 10));
                     setInputData({...inputData, [eventDef.id]: nv});
                   };
+
                   return (
-                    <div key={eventDef.id} className={`p-4 rounded-2xl shadow-sm border mb-3 ${theme.card}`}>
-                      <div className="flex justify-between items-center mb-2">
-                        <div className="flex items-center gap-2"><span className="text-2xl">{eventDef.icon}</span><h3 className="font-bold text-lg">{eventDef.name}</h3></div>
-                        <div className="text-right"><span className={`text-3xl font-extrabold ${theme.accentText}`}>{currentVal.toFixed(eventDef.step % 1 !== 0 ? 1 : 0)}</span><span className="opacity-60 ml-1 text-sm">{eventDef.unit}</span></div>
+                    <div key={eventDef.id} className={`p-4 rounded-2xl shadow-sm border mb-3 transition-opacity ${!isMeasured ? 'opacity-60' : ''} ${theme.card}`}>
+                      <div className="flex justify-between items-center mb-3 pb-2 border-b border-gray-100">
+                        <div className="flex items-center gap-2"><span className="text-xl">{eventDef.icon}</span><h3 className="font-bold">{eventDef.name}</h3></div>
+                        
+                        <label className="flex items-center cursor-pointer relative">
+                          <input type="checkbox" className="sr-only" checked={isMeasured} onChange={handleToggle} />
+                          <div className={`w-11 h-6 rounded-full transition-colors ${isMeasured ? 'bg-orange-500' : 'bg-gray-300'}`}></div>
+                          <div className={`absolute left-1 top-1 bg-white w-4 h-4 rounded-full transition-transform ${isMeasured ? 'transform translate-x-5' : ''}`}></div>
+                          <span className="ml-2 text-xs font-bold text-gray-500">測る</span>
+                        </label>
                       </div>
-                      <div className="flex justify-between items-center mb-3 gap-1">
+
+                      <div className="text-right mb-2">
+                        {isMeasured ? (
+                          <><span className={`text-3xl font-extrabold ${theme.accentText}`}>{currentVal.toFixed(eventDef.step % 1 !== 0 ? 1 : 0)}</span><span className="opacity-60 ml-1 text-sm">{eventDef.unit}</span></>
+                        ) : <span className="text-xl font-bold text-gray-400">未計測</span>}
+                      </div>
+
+                      <div className={`flex justify-between items-center mb-3 gap-1 ${!isMeasured ? 'pointer-events-none' : ''}`}>
                         <button onClick={() => handleVal(currentVal - eventDef.step * 10)} className={`py-2 px-2 rounded-xl font-bold flex-1 text-sm ${isHellMode ? 'bg-red-950 text-red-400' : 'bg-gray-100 text-gray-700'}`}>-大</button>
                         <button onClick={() => handleVal(currentVal - eventDef.step)} className={`py-2 px-2 rounded-xl font-bold flex-1 text-sm ${isHellMode ? 'bg-red-950 text-red-400' : 'bg-gray-100 text-gray-700'}`}>-小</button>
                         <div className="w-2"></div>
                         <button onClick={() => handleVal(currentVal + eventDef.step)} className={`py-2 px-2 rounded-xl font-bold flex-1 text-sm ${isHellMode ? 'bg-red-900 text-black' : 'bg-orange-100 text-orange-700'}`}>+小</button>
                         <button onClick={() => handleVal(currentVal + eventDef.step * 10)} className={`py-2 px-2 rounded-xl font-bold flex-1 text-sm ${isHellMode ? 'bg-red-900 text-black' : 'bg-orange-100 text-orange-700'}`}>+大</button>
                       </div>
-                      <input type="range" min={eventDef.min} max={eventDef.max} step={eventDef.step} value={currentVal} onChange={(e) => handleVal(parseFloat(e.target.value))} className={`w-full h-4 rounded-lg appearance-none cursor-pointer ${isHellMode ? 'bg-red-950 accent-red-600' : 'bg-gray-200 accent-orange-500'}`} />
+                      <input type="range" min={eventDef.min} max={eventDef.max} step={eventDef.step} value={currentVal} onChange={(e) => handleVal(parseFloat(e.target.value))} disabled={!isMeasured} className={`w-full h-4 rounded-lg appearance-none cursor-pointer ${isHellMode ? 'bg-red-950 accent-red-600' : 'bg-gray-200 accent-orange-500'}`} />
                     </div>
                   );
                 })}
@@ -641,27 +625,22 @@
                 
                 <div className={`rounded-3xl p-6 shadow-sm border ${theme.card}`}>
                   <h2 className={`font-bold text-xl mb-4 border-b pb-2 flex items-center gap-2 ${isHellMode?'border-red-900':''}`}><Icon name="user" /> 選手リスト</h2>
+                  <p className="text-xs opacity-70 mb-3">アイコンをタップして着せ替えしよう！</p>
                   <div className="space-y-3">
                     {childrenData.map(c => (
                       <div key={c.id} className={`flex justify-between items-center p-3 rounded-xl border ${isHellMode?'bg-black border-red-900':'bg-gray-50 border-gray-100'}`}>
                         <div className="flex items-center gap-3">
-                          <span className="text-3xl">{c.avatar}</span>
+                          <button onClick={() => { setCurrentChildId(c.id); setShowIconModal(true); }} className="text-4xl hover:scale-110 transition-transform active:scale-95 bg-white shadow-sm rounded-full w-14 h-14 flex items-center justify-center border border-gray-200">
+                            {c.avatar}
+                          </button>
                           <div>
-                            <div className="font-bold">{c.name}</div>
+                            <div className="font-bold text-lg">{c.name}</div>
                             <div className="text-xs opacity-60">{c.defaultGrade}年生 / {c.gender}</div>
                           </div>
                         </div>
                       </div>
                     ))}
                   </div>
-                </div>
-
-                <div className={`rounded-3xl p-6 shadow-sm border ${theme.card}`}>
-                  <h2 className={`font-bold text-xl mb-4 border-b pb-2 flex items-center gap-2 ${isHellMode?'border-red-900':''}`}><Icon name="swords" size={20}/> ライバル設定</h2>
-                  <select value={rivalId} onChange={e => setRivalId(e.target.value)} className={`w-full rounded-xl p-3 outline-none border ${isHellMode ? 'bg-black border-red-900 text-red-500' : 'bg-gray-50 border-gray-200'}`}>
-                    <option value="">設定しない</option>
-                    {childrenData.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-                  </select>
                 </div>
 
                 <div className={`rounded-3xl p-6 shadow-sm border ${theme.card}`}>
@@ -685,13 +664,6 @@
                         </select>
                       </div>
                     </div>
-                    <div>
-                      <label className="block text-sm font-bold opacity-80 mb-1">アイコン</label>
-                      <select name="avatar" className={`w-full rounded-xl p-3 text-2xl outline-none border ${isHellMode ? 'bg-black border-red-900 text-red-500' : 'bg-gray-50 border-gray-200'}`}>
-                        <option value="👦">👦</option><option value="👧">👧</option>
-                        <option value="🐱">🐱</option><option value="🐶">🐶</option><option value="🦁">🦁</option>
-                      </select>
-                    </div>
                     <button type="submit" className={`w-full font-bold py-3 rounded-xl mt-2 shadow-md ${isHellMode ? 'bg-red-900 text-black' : 'bg-gray-800 text-white'}`}>追加する</button>
                   </form>
                 </div>
@@ -708,12 +680,45 @@
           </div>
 
           {/* 地獄モードボタン */}
-          <button 
-            onClick={() => setIsHellMode(!isHellMode)}
-            className={`fixed top-20 right-2 p-2 rounded-full shadow-lg z-30 transition-colors border ${isHellMode ? 'bg-red-600 text-white border-red-400 animate-pulse' : 'bg-gray-800 text-gray-400 border-gray-600 opacity-50 hover:opacity-100'}`}
-          >
+          <button onClick={() => setIsHellMode(!isHellMode)} className={`fixed top-20 right-2 p-2 rounded-full shadow-lg z-30 transition-colors border ${isHellMode ? 'bg-red-600 text-white border-red-400 animate-pulse' : 'bg-gray-800 text-gray-400 border-gray-600 opacity-50 hover:opacity-100'}`}>
             <Icon name="skull" size={16} />
           </button>
+
+          {/* アイコン選択モーダル */}
+          {showIconModal && currentChild && (
+            <div className="fixed inset-0 bg-black/80 z-50 flex items-end sm:items-center justify-center p-4 backdrop-blur-sm animate-fade-in pb-safe">
+              <div className={`w-full max-w-sm rounded-3xl p-6 shadow-2xl border ${isHellMode ? 'bg-black border-red-800 text-red-500' : 'bg-white border-orange-200 text-gray-800'}`}>
+                <div className="flex justify-between items-center mb-4 border-b pb-2">
+                  <h3 className="font-bold text-lg">アイコンをえらぶ</h3>
+                  <button onClick={() => setShowIconModal(false)} className="opacity-50 p-2"><Icon name="x" size={20}/></button>
+                </div>
+                
+                <p className="text-xs opacity-70 mb-2 font-bold">基本のアイコン</p>
+                <div className="grid grid-cols-5 gap-3 mb-6">
+                  {DEFAULT_ICONS.map(i => (
+                    <button key={i} onClick={() => changeAvatar(i)} className={`text-3xl p-2 rounded-xl border ${currentChild.avatar === i ? 'border-orange-500 bg-orange-50' : 'border-gray-100 bg-gray-50'}`}>{i}</button>
+                  ))}
+                </div>
+
+                <p className="text-xs opacity-70 mb-2 font-bold flex items-center gap-1"><Icon name="lock" size={12}/> ご褒美レアアイコン（条件クリアで解放！）</p>
+                <div className="grid grid-cols-4 gap-3">
+                  {RARE_ICONS.map(r => {
+                    const isUnlocked = achievements.includes(r.id);
+                    return (
+                      <button 
+                        key={r.id} 
+                        onClick={() => isUnlocked ? changeAvatar(r.icon) : alert(`${r.name} の解放条件：\n${r.desc}`)} 
+                        className={`text-3xl p-2 rounded-xl border relative ${isUnlocked ? (currentChild.avatar === r.icon ? 'border-orange-500 bg-orange-50' : 'border-yellow-200 bg-yellow-50') : 'border-gray-100 bg-gray-100 grayscale opacity-40'}`}
+                      >
+                        {r.icon}
+                        {!isUnlocked && <Icon name="lock" size={16} className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 text-gray-800 opacity-50"/>}
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* AI Review Modal */}
           {showAiModal && (
