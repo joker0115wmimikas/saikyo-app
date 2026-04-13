@@ -53,10 +53,13 @@
     try {
       db.settings({ experimentalForceLongPolling: true });
     } catch (e) {
-      console.log("Firestore settings error:", e);
+      console.log("Firestore settings error (Ignored):", e);
     }
 
-    // --- Constants ---
+    // 家族共通のデータ保存場所
+    const SHARED_APP_ID = 'saikyo-shared';
+
+    // --- Constants & Masters ---
     const SCORE_THRESHOLDS = {
       '男': {
         grip: [ [12,11,9,8,7,5,4,3,2], [14,13,11,10,8,6,5,4,3], [17,15,13,12,10,8,7,5,4], [19,18,16,14,12,10,8,6,5], [23,21,18,16,14,12,10,8,6], [27,24,21,19,16,13,11,9,7] ],
@@ -162,9 +165,6 @@
     // --- Main App Component ---
     function App() {
       const [user, setUser] = useState(null);
-      const [familyCode, setFamilyCode] = useState(localStorage.getItem('saikyo_family_code') || '');
-      const [inputFamilyCode, setInputFamilyCode] = useState('');
-      
       const [authError, setAuthError] = useState('');
       const [childrenData, setChildrenData] = useState([]);
       const [records, setRecords] = useState([]);
@@ -184,69 +184,56 @@
       const [isAiLoading, setIsAiLoading] = useState(false);
       const [showAiModal, setShowAiModal] = useState(false);
 
-      // Auth
+      // Auth (Initialize and get valid connection)
       useEffect(() => {
         let isMounted = true;
-        auth.setPersistence(firebase.auth.Auth.Persistence.LOCAL)
-          .catch(() => auth.setPersistence(firebase.auth.Auth.Persistence.NONE))
-          .then(() => {
-            const unsubscribe = auth.onAuthStateChanged(currentUser => {
-              if (!isMounted) return;
-              if (currentUser) {
-                setUser(currentUser);
-                setAuthError('');
-              } else {
-                auth.signInAnonymously().catch(e => {
-                  console.error("Auth Error:", e);
-                  setAuthError(`ログイン処理に失敗しました。お使いのブラウザで「サイト越えトラッキング」がブロックされている可能性があります。\n[詳細: ${e.message}]`);
-                });
-              }
-            });
-            return () => { isMounted = false; unsubscribe && unsubscribe(); };
-          });
+        const initAuth = async () => {
+          try {
+            await auth.signInAnonymously();
+          } catch (e) {
+            console.error("Auth Error:", e);
+            if(isMounted) setAuthError(`接続エラー: ${e.message}`);
+          }
+        };
+        initAuth();
+        
+        const unsubscribe = auth.onAuthStateChanged(currentUser => {
+          if (!isMounted) return;
+          if (currentUser) {
+            setUser(currentUser);
+            setAuthError('');
+          }
+        });
+        return () => { isMounted = false; unsubscribe && unsubscribe(); };
       }, []);
 
-      // Data Fetching
+      // Data Fetching (共通のパスから全データを取得)
       useEffect(() => {
-        // ユーザーがログインしていない、または合言葉がない場合はデータを取得しない
-        if (!user || !familyCode) return;
+        if (!user) return;
         
-        const childrenRef = db.collection('families').doc(familyCode).collection('children');
-        const recordsRef = db.collection('families').doc(familyCode).collection('records');
+        // ★ ここがポイント：全員が同じ「saikyo-shared」フォルダを見る
+        const basePath = db.collection('artifacts').doc(SHARED_APP_ID).collection('public').doc('data');
+        const childrenRef = basePath.collection('children');
+        const recordsRef = basePath.collection('records');
 
         const unsubChildren = childrenRef.onSnapshot(snap => {
           const data = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
           setChildrenData(data);
-          // エラーが消えたらリセット
-          setAuthError('');
+          setAuthError(''); // 成功したらエラーを消す
           if (data.length > 0 && !currentChildId) setCurrentChildId(data[0].id);
         }, err => {
           console.error("Fetch children error:", err);
-          setAuthError(`データ読込エラー！\nFirebaseのルールが反映されていないか、設定に誤りがあります。\n[詳細: ${err.message}]`);
+          setAuthError(`通信エラー: Firebaseのルール設定（ステップ1）を完了してください。\n[${err.message}]`);
         });
 
         const unsubRecords = recordsRef.onSnapshot(snap => {
           setRecords(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })));
         }, err => {
-           console.error("Fetch records error:", err);
+          console.error("Fetch records error:", err);
         });
 
         return () => { unsubChildren(); unsubRecords(); };
-      }, [user, familyCode, currentChildId]);
-
-      const handleFamilyCodeSubmit = (e) => {
-        e.preventDefault();
-        // ログインがまだ完了していない場合は警告
-        if (!user) {
-          alert("裏側でログイン処理が完了していません。数秒待つか、ブラウザのプライベートモードを解除してください。");
-          return;
-        }
-        if(!inputFamilyCode) return;
-        localStorage.setItem('saikyo_family_code', inputFamilyCode);
-        setFamilyCode(inputFamilyCode);
-        // リロードして状態を確実にリセット
-        window.location.reload();
-      };
+      }, [user, currentChildId]);
 
       const currentChild = childrenData.find(c => c.id === currentChildId);
       const rivalChild = childrenData.find(c => c.id === rivalId);
@@ -279,8 +266,7 @@
 
       // Actions
       const handleSaveRecord = async () => {
-        if (!user) return alert("ログインが完了していません。画面の赤いエラーを確認してください。");
-        if (!familyCode) return alert("合言葉が設定されていません。");
+        if (!user) return alert("接続が完了していません。数秒お待ちください。");
         if (!currentChildId) return alert("選手を選択してください。");
         
         const recordId = editingRecordId || Date.now().toString();
@@ -294,29 +280,30 @@
         };
         
         try {
-          await db.collection('families').doc(familyCode).collection('records').doc(recordId).set(newRecord);
+          const basePath = db.collection('artifacts').doc(SHARED_APP_ID).collection('public').doc('data');
+          await basePath.collection('records').doc(recordId).set(newRecord);
           setCurrentTab('history');
         } catch (e) { 
           console.error(e); 
-          alert(`保存エラー！Firebaseのルール設定を確認してください。\n[詳細: ${e.message}]`); 
+          alert(`保存エラー: Firebaseのルールが変更されていない可能性があります。\n[${e.message}]`); 
         }
       };
 
       const handleDeleteRecord = async () => {
-        if (!user || !editingRecordId || !familyCode) return;
+        if (!user || !editingRecordId) return;
         if (window.confirm('本当にこの記録を削除しますか？')) {
           try {
-            await db.collection('families').doc(familyCode).collection('records').doc(editingRecordId).delete();
+            const basePath = db.collection('artifacts').doc(SHARED_APP_ID).collection('public').doc('data');
+            await basePath.collection('records').doc(editingRecordId).delete();
             setCurrentTab('history');
-          } catch (e) { console.error(e); alert(`削除に失敗しました\n[詳細: ${e.message}]`); }
+          } catch (e) { console.error(e); alert('削除に失敗しました'); }
         }
       };
 
       const handleAddChild = async (e) => {
         e.preventDefault();
         
-        if (!user) return alert("ログインが完了していません。画面の赤いエラーを確認してください。");
-        if (!familyCode) return alert("合言葉を設定してください。");
+        if (!user) return alert("接続が完了していません。画面の赤いエラーを確認してください。");
 
         const fd = new FormData(e.target);
         const name = fd.get('name');
@@ -330,13 +317,14 @@
         };
         
         try {
-          await db.collection('families').doc(familyCode).collection('children').doc(newId).set(newChild);
+          const basePath = db.collection('artifacts').doc(SHARED_APP_ID).collection('public').doc('data');
+          await basePath.collection('children').doc(newId).set(newChild);
           setCurrentChildId(newId);
           setCurrentTab('home');
           e.target.reset();
         } catch (e) { 
           console.error(e); 
-          alert(`選手登録エラー！Firebaseのルール設定を確認してください。\n[詳細: ${e.message}]`); 
+          alert(`選手追加エラー: Firebaseのルールが変更されていない可能性があります。\n[${e.message}]`); 
         }
       };
 
@@ -413,40 +401,6 @@
         ? { bg: 'bg-gray-950', text: 'text-red-100 font-serif', card: 'bg-gray-900 border-red-900', accent: 'bg-red-800 text-white', accentText: 'text-red-500' }
         : { bg: 'bg-slate-50', text: 'text-gray-800 font-sans', card: 'bg-white border-gray-100', accent: 'bg-orange-500 text-white', accentText: 'text-orange-500' };
 
-      // ★ 家族の合言葉入力画面 ★
-      if (!familyCode) {
-        return (
-          <div className="max-w-md mx-auto min-h-screen bg-orange-50 flex flex-col items-center justify-center p-6">
-            <div className="bg-white p-8 rounded-3xl shadow-xl w-full text-center">
-              <Icon name="key-round" size={48} className="text-orange-500 mx-auto mb-4" />
-              <h1 className="text-xl font-extrabold text-gray-800 mb-2">家族の合言葉を入力</h1>
-              <p className="text-xs text-gray-500 mb-6 font-bold leading-relaxed">
-                お母さんのスマホとお子さんのスマホで<br/>同じ合言葉を入れるとデータが共有されるよ！<br/>（例：suzuki1234）
-              </p>
-              <form onSubmit={handleFamilyCodeSubmit}>
-                <input 
-                  type="text" 
-                  required
-                  value={inputFamilyCode}
-                  onChange={e => setInputFamilyCode(e.target.value)}
-                  placeholder="合言葉を決めてね" 
-                  className="w-full bg-gray-100 border border-gray-200 rounded-xl p-4 font-bold outline-none focus:ring-2 focus:ring-orange-500 mb-4 text-center text-lg"
-                />
-                <button type="submit" className="w-full bg-orange-500 text-white font-bold py-4 rounded-xl shadow-md text-lg">
-                  はじめる！
-                </button>
-              </form>
-            </div>
-            
-            {/* ログインエラーがある場合は下に小さく表示 */}
-            {authError && (
-              <div className="mt-4 bg-red-100 text-red-700 p-3 rounded-xl text-xs font-bold text-center w-full">
-                ⚠️ 準備中: {authError}
-              </div>
-            )}
-          </div>
-        );
-      }
 
       return (
         <div className={`max-w-md mx-auto min-h-screen pb-24 shadow-2xl relative overflow-hidden transition-colors duration-500 ${theme.bg} ${theme.text}`}>
@@ -490,7 +444,7 @@
               </div>
             )}
 
-            {childrenData.length === 0 && currentTab !== 'settings' && (
+            {childrenData.length === 0 && currentTab !== 'settings' && !authError && (
               <div className="text-center py-20 animate-fade-in">
                 <Icon name="user" size={64} className="mx-auto mb-4 text-gray-300" />
                 <h2 className="text-xl font-bold mb-2">まずは選手を登録しよう！</h2>
@@ -740,12 +694,6 @@
                     </div>
                     <button type="submit" className={`w-full font-bold py-3 rounded-xl mt-2 shadow-md ${isHellMode ? 'bg-red-900 text-black' : 'bg-gray-800 text-white'}`}>追加する</button>
                   </form>
-                </div>
-
-                <div className={`rounded-3xl p-6 shadow-sm border ${theme.card}`}>
-                  <h2 className={`font-bold text-xl mb-4 border-b pb-2 flex items-center gap-2 ${isHellMode?'border-red-900':''}`}><Icon name="key-round" size={20}/> 家族の合言葉</h2>
-                  <p className="text-sm opacity-80 mb-2">現在の合言葉: <span className="font-bold text-orange-500">{familyCode}</span></p>
-                  <button onClick={() => { localStorage.removeItem('saikyo_family_code'); window.location.reload(); }} className="w-full bg-red-100 text-red-600 font-bold py-2 rounded-xl mt-2">合言葉を変更する</button>
                 </div>
               </div>
             )}
